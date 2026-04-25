@@ -1,0 +1,15 @@
+{
+  "name": "learning-companion-backend",
+  "version": "1.0.0",
+  "description": "Cloud Run Functions backend for Gemini 3.1 Pro & AlloyDB",
+  "main": "index.js",
+  "scripts": {
+    "start": "functions-framework --target=evaluateFeynman"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.3.0",
+    "@google-cloud/vertexai": "^1.1.0",
+    "firebase-admin": "^11.11.0",
+    "pg": "^8.11.3"
+  }
+}
