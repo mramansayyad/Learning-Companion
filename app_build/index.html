@@ -8,50 +8,53 @@
 </head>
 <body>
   
-  <div id="auth-overlay" class="glass-panel">
-    <h2>Learning Companion AI</h2>
+  <div id="auth-overlay" class="glass-panel" role="region" aria-labelledby="auth-title">
+    <h2 id="auth-title">Learning Companion AI</h2>
     <p>Sign in to begin your Active Recall sessions.</p>
-    <button id="login-btn" class="neon-btn">Sign In with Google</button>
+    <button id="login-btn" class="neon-btn" aria-label="Sign In with Google">Sign In with Google</button>
   </div>
 
-  <main id="app-container" class="hidden">
+  <main id="app-container" class="hidden" role="main">
     <!-- Sidebar / Stats -->
-    <aside class="glass-panel sidebar">
+    <aside class="glass-panel sidebar" aria-label="Study Statistics">
       <h3>Active Sessions</h3>
       <div id="stats-container">
          <p>Recall Loop Status: <span class="neon-text-purple">Active</span></p>
          <p>Techniques Mastered: <span id="mastered-count" class="neon-text-cyan">0</span></p>
       </div>
-      <button id="logout-btn" class="neon-btn outline">Log Out</button>
+      <button id="logout-btn" class="neon-btn outline" aria-label="Log Out">Log Out</button>
     </aside>
 
     <!-- Main Workspace: Feynman Technique -->
-    <section class="glass-panel workspace">
+    <section class="glass-panel workspace" aria-label="Feynman Technique Workspace">
       <header>
         <h2>Feynman Engine</h2>
         <p>Explain a concept as if you were teaching a beginner.</p>
       </header>
 
       <div class="feynman-io">
-        <input type="text" id="topic-input" placeholder="Topic (e.g. Quantum Computing)" />
-        <textarea id="explanation-input" placeholder="Your simplified explanation goes here..."></textarea>
-        <button id="submit-explanation" class="neon-btn">Evaluate via AI</button>
+        <label for="topic-input" class="sr-only">Topic</label>
+        <input type="text" id="topic-input" aria-required="true" placeholder="Topic (e.g. Quantum Computing)" />
+        <label for="explanation-input" class="sr-only">Explanation</label>
+        <textarea id="explanation-input" aria-required="true" placeholder="Your simplified explanation goes here..."></textarea>
+        <button id="submit-explanation" class="neon-btn" aria-label="Evaluate explanation via AI">Evaluate via AI</button>
       </div>
 
-      <div class="feynman-evaluation">
-        <h3>AI Evaluation</h3>
-        <div id="evaluation-result" class="glass-inner-panel">
+      <div class="feynman-evaluation" role="region" aria-labelledby="eval-heading">
+        <h3 id="eval-heading">AI Evaluation</h3>
+        <div id="evaluation-result" class="glass-inner-panel" aria-live="polite" aria-atomic="true">
           <p class="placeholder-text">Awaiting submission...</p>
         </div>
       </div>
     </section>
   </main>
 
+  <!-- Firebase Compat Global Scripts -->
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-  
+
   <script type="module" src="js/firebase-config.js"></script>
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=8"></script>
 </body>
 </html>

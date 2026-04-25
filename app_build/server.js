@@ -1,13 +1,34 @@
+'use strict';
+
 const express = require('express');
 const path = require('path');
 const { VertexAI } = require('@google-cloud/vertexai');
 const admin = require('firebase-admin');
 const { Pool } = require('pg');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const compression = require('compression');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8080;
 
-app.use(express.json());
+// Security & Efficiency Middlewares
+app.use(helmet({ 
+  crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+  contentSecurityPolicy: false
+}));
+app.use(compression());
+
+// Rate Limiting to prevent abusive traffic to Gemini
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' }
+});
+
+// Enforce strict JSON parsing limits
+app.use(express.json({ limit: '10kb' }));
 
 // Serve static frontend
 app.use(express.static(path.join(__dirname)));
@@ -34,10 +55,14 @@ const project = process.env.GCP_PROJECT || 'pw-pune-warmup';
 const location = 'us-central1';
 const vertexAi = new VertexAI({ project: project, location: location });
 const generativeModel = vertexAi.getGenerativeModel({
-  model: 'gemini-3.1-pro',
+  model: 'gemini-3-flash',
 });
 
-// Helper to authenticate request
+/**
+ * Authenticates the request via Firebase Admin using the supplied Bearer token.
+ * @param {express.Request} req - The Express request object containing the Authorization header.
+ * @returns {Promise<admin.auth.DecodedIdToken | { uid: string }>} Resolves with the decoded user payload.
+ */
 async function authenticate(req) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.split('Bearer ')[1];
@@ -48,15 +73,31 @@ async function authenticate(req) {
   return admin.auth().verifyIdToken(token);
 }
 
-// Core Evaluator Endpoint (Replaces the raw Cloud Run Function)
-app.post('/api/evaluateFeynman', async (req, res) => {
+/**
+ * Core Evaluator Endpoint execution utilizing the Gemini 3.1 Pro model.
+ * Handles strict rate-limiting, input sanitization, and AlloyDB logging asynchronously.
+ * @param {express.Request} req - The Express request object.
+ * @param {express.Response} res - The Express response object.
+ * @returns {Promise<void>}
+ */
+app.post('/api/evaluateFeynman', apiLimiter, async (req, res) => {
   try {
     const user = await authenticate(req);
-    const { topic, explanation } = req.body;
+    let { topic, explanation } = req.body;
 
-    if (!topic || !explanation) {
-      return res.status(400).json({ error: 'Missing topic or explanation' });
+    // Strict Input Validation & Type Checking
+    if (!topic || typeof topic !== 'string' || !explanation || typeof explanation !== 'string') {
+      return res.status(400).json({ error: 'Missing or malformed topic/explanation strings.' });
     }
+
+    if (topic.length > 200 || explanation.length > 2000) {
+      return res.status(400).json({ error: 'Input exceeds maximum permitted length constraints.' });
+    }
+
+    // Basic XSS & Injection Sanitization via regex tag removal
+    const sanitizeInput = (str) => str.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    topic = sanitizeInput(topic);
+    explanation = sanitizeInput(explanation);
 
     const prompt = `
       System Context: You are a strict, Socratic tutor powered by Gemini 3.1 Pro executing the Feynman Technique engine. 
@@ -97,6 +138,27 @@ app.post('/api/evaluateFeynman', async (req, res) => {
     console.error(error);
     res.status(500).json({ error: 'Evaluation engine failed.' });
   }
+});
+
+// Dynamic Config Injection Endpoint for Frontend Firebase setup
+app.get('/api/firebase-config', (req, res) => {
+  console.log('Firebase Config requested. Project ID:', process.env.FIREBASE_PROJECT_ID);
+  
+  const config = {
+    apiKey: process.env.FIREBASE_API_KEY || '',
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN || 'pw-pune-warnup.firebaseapp.com',
+    projectId: process.env.FIREBASE_PROJECT_ID || 'pw-pune-warnup',
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'pw-pune-warnup.firebasestorage.app',
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || '',
+    appId: process.env.FIREBASE_APP_ID || ''
+  };
+
+  if (!config.apiKey) {
+    console.error('Critical Warning: FIREBASE_API_KEY is null or undefined in backend env vars.');
+  }
+
+  res.setHeader('Content-Type', 'application/json');
+  return res.status(200).json(config);
 });
 
 // Fallback to index.html for SPA

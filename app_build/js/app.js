@@ -1,4 +1,8 @@
-import { auth, provider, db } from './firebase-config.js';
+'use strict';
+
+// setup firebase objects globally
+
+import { initFirebase } from './firebase-config.js';
 
 // DOM Elements
 const authOverlay = document.getElementById('auth-overlay');
@@ -12,35 +16,57 @@ const submitBtn = document.getElementById('submit-explanation');
 const evaluationResult = document.getElementById('evaluation-result');
 const masteredCountEl = document.getElementById('mastered-count');
 
-// Evaluate path for unified Express hosting
 const GEMINI_FUNCTION_URL = '/api/evaluateFeynman';
 
 let currentUser = null;
+let auth, db, provider;
 
-// Auth State Observer
-auth.onAuthStateChanged(user => {
-  if (user) {
-    currentUser = user;
-    authOverlay.classList.add('hidden');
-    appContainer.classList.remove('hidden');
-    loadUserStats();
-  } else {
-    currentUser = null;
-    authOverlay.classList.remove('hidden');
-    appContainer.classList.add('hidden');
+async function bootstrap() {
+  try {
+    const fb = await initFirebase();
+    auth = fb.auth;
+    db = fb.db;
+    provider = fb.provider;
+
+    // Auth State Observer
+    auth.onAuthStateChanged(user => {
+      if (user) {
+        currentUser = user;
+        authOverlay.classList.add('hidden');
+        appContainer.classList.remove('hidden');
+        loadUserStats();
+      } else {
+        currentUser = null;
+        authOverlay.classList.remove('hidden');
+        appContainer.classList.add('hidden');
+      }
+    });
+
+    // Login / Logout
+    loginBtn.addEventListener('click', () => {
+      auth.signInWithPopup(provider).catch(err => {
+        console.error(err);
+        authOverlay.innerHTML += '<p style="color:red; text-align:center;">' + err.message + '</p>';
+      });
+    });
+
+    logoutBtn.addEventListener('click', () => {
+      auth.signOut();
+    });
+
+    submitBtn.addEventListener('click', handleFeynmanSubmit);
+
+  } catch (err) {
+    console.log("Firebase Init Error:", err);
+    authOverlay.innerHTML += `<p style="color:red; text-align:center; padding:10px;">Error: ${err.message}</p>`;
   }
-});
+}
 
-// Login / Logout
-loginBtn.addEventListener('click', () => {
-  auth.signInWithPopup(provider).catch(err => console.error(err));
-});
-
-logoutBtn.addEventListener('click', () => {
-  auth.signOut();
-});
-
-// Load Active Recall stats from Firestore
+/**
+ * Loads the user's Active Recall statistics natively from Firestore.
+ * Listens to Realtime snapshots for any subsequent metric changes.
+ * @returns {Promise<void>}
+ */
 async function loadUserStats() {
   if (!currentUser) return;
   const userRef = db.collection('users').doc(currentUser.uid);
@@ -55,8 +81,8 @@ async function loadUserStats() {
   });
 }
 
-// Feynman Evaluation Trigger
-submitBtn.addEventListener('click', async () => {
+// Feynman Evaluation Trigger Handler
+async function handleFeynmanSubmit() {
   const topic = topicInput.value.trim();
   const explanation = explanationInput.value.trim();
 
@@ -72,6 +98,9 @@ submitBtn.addEventListener('click', async () => {
   try {
     const token = await currentUser.getIdToken();
     
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
     // Call our Cloud Run Function
     const response = await fetch(GEMINI_FUNCTION_URL, {
       method: 'POST',
@@ -79,10 +108,16 @@ submitBtn.addEventListener('click', async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ topic, explanation })
+      body: JSON.stringify({ topic, explanation }),
+      signal: controller.signal
     });
 
-    if (!response.ok) throw new Error('Failed to evaluate via API');
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errText}`);
+    }
 
     const data = await response.json();
     
@@ -96,6 +131,7 @@ submitBtn.addEventListener('click', async () => {
     `;
 
     // Active recall / Spaced Repetition log
+    // We import firebase from CDN, meaning 'firebase.firestore.FieldValue' is globally available
     await db.collection('users').doc(currentUser.uid).collection('sessions').add({
       topic,
       grade,
@@ -105,9 +141,16 @@ submitBtn.addEventListener('click', async () => {
 
   } catch (err) {
     console.error(err);
-    evaluationResult.innerHTML = `<p style="color: red;">Error during evaluation. See console.</p>`;
+    let errMsg = `Error during evaluation: ${err.message || err}`;
+    if (err.name === 'AbortError') {
+      errMsg = 'Request timed out after 15 seconds. Ensure Vertex AI and networking are correctly configured.';
+    }
+    evaluationResult.innerHTML = `<p style="color: red;">${errMsg}</p>`;
   } finally {
     submitBtn.disabled = false;
     submitBtn.textContent = 'Evaluate via AI';
   }
-});
+}
+
+// Start application process
+bootstrap();

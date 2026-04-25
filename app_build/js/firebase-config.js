@@ -1,22 +1,27 @@
 // firebase-config.js
-// Set up Firebase configuration for pw-pune-warmup project
+// Setup Firebase configuration dynamically for the active project.
+// setup firebase objects globally
 
-const firebaseConfig = {
-  apiKey: "AIzaSy_REPLACE_WITH_YOUR_FIREBASE_API_KEY",
-  authDomain: "pw-pune-warmup.firebaseapp.com",
-  projectId: "pw-pune-warmup",
-  storageBucket: "pw-pune-warmup.appspot.com",
-  messagingSenderId: "REPLACE_WITH_SENDER_ID",
-  appId: "REPLACE_WITH_APP_ID"
-};
-
-// Initialize Firebase only if the app hasn't been initialized yet
-if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
+export async function initFirebase() {
+  if (!firebase.apps.length) {
+    const res = await fetch('/api/firebase-config');
+    if (!res.ok) {
+      throw new Error(`Server fetch failed: ${res.status} ${res.statusText}`);
+    }
+    
+    const firebaseConfig = await res.json();
+    
+    // Explicit Validation before passing to initialization mapping
+    if (!firebaseConfig.apiKey) {
+      throw new Error('Config object payload empty - check the Cloud Run env var deployments.');
+    }
+    
+    firebase.initializeApp(firebaseConfig);
+  }
+  
+  return {
+    auth: firebase.auth(),
+    db: firebase.firestore(),
+    provider: new firebase.auth.GoogleAuthProvider()
+  };
 }
-
-export const auth = firebase.auth();
-export const db = firebase.firestore();
-
-// Provider setup for Active Recall Identity
-export const provider = new firebase.auth.GoogleAuthProvider();
