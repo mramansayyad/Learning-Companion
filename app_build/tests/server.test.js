@@ -1,75 +1,96 @@
-'use strict';
+const request = require("supertest");
+const app = require("../server");
 
-const request = require('supertest');
-const express = require('express');
-
-// Create a mock app for testing routes in isolation
-const app = express();
-app.use(express.json());
-
-// Mock rate limiter
-const mockLimiter = (req, res, next) => next();
-
-// Test evaluation endpoint
-app.post('/api/evaluateFeynman', mockLimiter, async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  let { topic, explanation } = req.body;
-
-  if (!topic || typeof topic !== 'string' || !explanation || typeof explanation !== 'string') {
-    return res.status(400).json({ error: 'Missing or malformed topic/explanation strings.' });
-  }
-
-  if (topic.length > 200 || explanation.length > 2000) {
-    return res.status(400).json({ error: 'Input exceeds maximum permitted length constraints.' });
-  }
-  
-  // Mock standard response
-  res.status(200).json({
-    grade: '8/10',
-    feedback: 'Good job! Can you explain how it relates to interference?',
-    isMastered: true
-  });
+// Mocking external VertexAI & Firebase so tests pass seamlessly in CI/CD without real credentials
+jest.mock("@google-cloud/vertexai", () => {
+  return {
+    VertexAI: jest.fn().mockImplementation(() => ({
+      getGenerativeModel: jest.fn().mockReturnValue({
+        generateContent: jest.fn().mockResolvedValue({
+          response: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: `{"grade": "8/10", "feedback": "Great explanation!", "isMastered": true}`,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        }),
+      }),
+    })),
+  };
 });
 
-describe('Feynman Engine Evaluation API', () => {
-  it('should reject requests without authorization token', async () => {
-    const res = await request(app)
-      .post('/api/evaluateFeynman')
-      .send({ topic: 'Quantum', explanation: 'It is small.' });
-    expect(res.statusCode).toEqual(401);
+jest.mock("firebase-admin", () => {
+  // A simple stable mock to trick authenticate() if we choose to write an authenticated test case
+  return {
+    apps: [true],
+    initializeApp: jest.fn(),
+    auth: () => ({
+      verifyIdToken: jest.fn().mockResolvedValue({ uid: "test-user-unit" }),
+    }),
+  };
+});
+
+// Mock database connection
+jest.mock("pg", () => {
+  return {
+    Pool: jest.fn().mockImplementation(() => ({
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+    })),
+  };
+});
+
+describe("Backend API Integration Tests", () => {
+  
+  describe("GET /api/firebase-config", () => {
+    it("should return the firebase domain variables", async () => {
+      const res = await request(app).get("/api/firebase-config");
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toHaveProperty("projectId");
+      expect(res.body).toHaveProperty("authDomain");
+    });
   });
 
-  it('should reject malformed or missing payloads', async () => {
-    const res = await request(app)
-      .post('/api/evaluateFeynman')
-      .set('Authorization', 'Bearer mock-token-123')
-      .send({ explanation: 'Missing topic' });
-    expect(res.statusCode).toEqual(400);
-    expect(res.body.error).toMatch(/Missing or malformed/);
+  describe("POST /api/evaluateFeynman", () => {
+    it("should reject payloads with missing explanations", async () => {
+      const res = await request(app)
+        .post("/api/evaluateFeynman")
+        .set("Authorization", "Bearer MOCK_TOKEN")
+        .send({ topic: "Quantum Mechanics" });
+      
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toMatch(/Missing or malformed/i);
+    });
+
+    it("should reject too long topics exceeding bounds", async () => {
+      const longTopic = "A".repeat(250);
+      const res = await request(app)
+        .post("/api/evaluateFeynman")
+        .set("Authorization", "Bearer MOCK_TOKEN")
+        .send({ topic: longTopic, explanation: "An explanation" });
+      
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toMatch(/exceeds maximum permitted length/i);
+    });
+
+    it("should accept valid prompts and evaluate them via generative model", async () => {
+      const res = await request(app)
+        .post("/api/evaluateFeynman")
+        .set("Authorization", "Bearer MOCK_TOKEN")
+        .send({ topic: "Quantum Mechanics", explanation: "It's superposition!" });
+      
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toHaveProperty("grade");
+      expect(res.body).toHaveProperty("feedback");
+      expect(res.body).toHaveProperty("isMastered");
+      expect(res.body.grade).toBe("8/10");
+    });
   });
 
-  it('should return a 200 and evaluation on valid payload', async () => {
-    const res = await request(app)
-      .post('/api/evaluateFeynman')
-      .set('Authorization', 'Bearer mock-token-123')
-      .send({ topic: 'Quantum', explanation: 'It involves superposition.' });
-    expect(res.statusCode).toEqual(200);
-    expect(res.body).toHaveProperty('grade');
-    expect(res.body).toHaveProperty('feedback');
-    expect(res.body).toHaveProperty('isMastered');
-  });
-
-  it('should reject payloads exceeding maximum length constraints', async () => {
-    const longString = 'a'.repeat(250);
-    const res = await request(app)
-      .post('/api/evaluateFeynman')
-      .set('Authorization', 'Bearer mock-token-123')
-      .send({ topic: longString, explanation: 'Valid explanation' });
-    expect(res.statusCode).toEqual(400);
-    expect(res.body.error).toMatch(/exceeds maximum permitted length/);
-  });
 });

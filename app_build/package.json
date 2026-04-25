@@ -4,7 +4,8 @@
   "description": "Full-stack Learning Companion AI",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "jest"
   },
   "dependencies": {
     "@google-cloud/vertexai": "^1.1.0",
@@ -14,5 +15,9 @@
     "firebase-admin": "^11.11.0",
     "helmet": "^8.1.0",
     "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0",
+    "supertest": "^7.2.2"
   }
 }
