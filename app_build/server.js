@@ -2,203 +2,168 @@
 
 const express = require("express");
 const path = require("path");
-const { VertexAI } = require("@google-cloud/vertexai");
-const admin = require("firebase-admin");
-const { Pool } = require("pg");
+const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const compression = require("compression");
+const { body, validationResult } = require("express-validator");
+const admin = require("firebase-admin");
+const { Pool } = require("pg");
+
+const aiService = require("./services/aiService");
 
 const app = express();
-app.set("trust proxy", 1);
 const PORT = process.env.PORT || 8080;
 
-// Security & Efficiency Middlewares
+// 1. GLOBAL SETTINGS & SECURITY
+app.set("trust proxy", 1);
+app.disable("x-powered-by"); // Hide backend technology
+
+app.use(cors({
+  origin: true, // Allow all origins for the hackathon
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
 app.use(
   helmet({
     crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "https://www.gstatic.com", "https://*.firebaseapp.com", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        imgSrc: ["'self'", "data:", "https://*.googleusercontent.com", "https://www.gstatic.com"],
+        connectSrc: ["'self'", "https://*.googleapis.com", "https://*.firebaseio.com", "https://*.firebaseapp.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        objectSrc: ["'none'"],
+        upgradeInsecureRequests: [],
+      },
+    },
   }),
 );
+
 app.use(compression());
-
-// Rate Limiting to prevent abusive traffic to Gemini
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: "Too many requests, please try again later." },
-});
-
-// Enforce strict JSON parsing limits
 app.use(express.json({ limit: "10kb" }));
+app.use(express.static(path.join(__dirname), { 
+  maxAge: "1d",
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-cache");
+  }
+}));
 
-// Serve static frontend with caching for efficiency (1 day max-age)
-app.use(express.static(path.join(__dirname), { maxAge: "1d" }));
-
-// Dummy initialization for Firebase admin to pass tests locally without credentials
+// 2. DATABASE & FIREBASE INIT
 if (admin.apps.length === 0) {
   try {
     admin.initializeApp();
   } catch (e) {
-    console.warn("Firebase admin initialization warning: ", e.message);
+    console.warn("Firebase Admin Init Warning:", e.message);
   }
 }
 
-// Configuration for AlloyDB (Replace with Secret Manager values in production)
 const dbPool = new Pool({
   host: process.env.ALLOYDB_HOST || "localhost",
   user: process.env.ALLOYDB_USER || "admin",
   password: process.env.ALLOYDB_PASSWORD || "secret",
   database: process.env.ALLOYDB_NAME || "learning_data",
+  max: 20,
+  idleTimeoutMillis: 30000,
 });
 
-// Setup Vertex AI (Gemini 3.1 Pro)
-const project = process.env.GCP_PROJECT || "pw-pune-warmup";
-const location = "us-central1";
-const vertexAi = new VertexAI({ project: project, location: location });
-const generativeModel = vertexAi.getGenerativeModel({
-  model: "gemini-3-flash",
-});
-
-/**
- * Authenticates the request via Firebase Admin using the supplied Bearer token.
- * @param {express.Request} req - The Express request object containing the Authorization header.
- * @returns {Promise<admin.auth.DecodedIdToken | { uid: string }>} Resolves with the decoded user payload.
- */
-async function authenticate(req) {
+// 3. AUTH MIDDLEWARE
+async function authenticate(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.split("Bearer ")[1];
+  
   if (!token) {
-    if (process.env.NODE_ENV === "development") return { uid: "test-user-123" };
-    throw new Error("Unauthorized");
+    if (process.env.NODE_ENV === "development") {
+      req.user = { uid: "dev-user-123" };
+      return next();
+    }
+    return res.status(401).json({ error: "No authentication token provided" });
   }
-  return admin.auth().verifyIdToken(token);
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
 }
 
-/**
- * Core Evaluator Endpoint execution utilizing the Gemini 3.1 Pro model.
- * Handles strict rate-limiting, input sanitization, and AlloyDB logging asynchronously.
- * @param {express.Request} req - The Express request object.
- * @param {express.Response} res - The Express response object.
- * @returns {Promise<void>}
- */
-app.post("/api/evaluateFeynman", apiLimiter, async (req, res) => {
-  try {
-    const user = await authenticate(req);
-    let { topic, explanation } = req.body;
+// 4. API ROUTES
 
-    // Strict Input Validation & Type Checking
-    if (
-      !topic ||
-      typeof topic !== "string" ||
-      !explanation ||
-      typeof explanation !== "string"
-    ) {
-      return res
-        .status(400)
-        .json({ error: "Missing or malformed topic/explanation strings." });
-    }
-
-    if (topic.length > 200 || explanation.length > 2000) {
-      return res
-        .status(400)
-        .json({ error: "Input exceeds maximum permitted length constraints." });
-    }
-
-    // Basic XSS & Injection Sanitization via entity encoding
-    const sanitizeInput = (str) =>
-      String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-    topic = sanitizeInput(topic);
-    explanation = sanitizeInput(explanation);
-
-    const prompt = `
-      System Context: You are a strict, Socratic tutor powered by Gemini 3.1 Pro executing the Feynman Technique engine. 
-      Objective: Evaluate the student's explanation. DO NOT impart direct answers under any circumstance. Provide scaffolding hints.
-      
-      Topic: "${topic}"
-      Explanation: "${explanation}"
-
-      Execution Directives:
-      1. Logic Check: Map hallucinated concepts or gaps in fundamental understanding.
-      2. Scaffolding Phase: Ask exactly 1 probing, Socratic question to guide the student toward the correct mental model.
-      3. Grading: Assign a strict score out of 10. (Mastered = 8+).
-      
-      Output strictly as raw JSON:
-      {
-        "grade": "X/10",
-        "feedback": "<scaffolding_hint_or_question>",
-        "isMastered": boolean
-      }
-    `;
-
-    const chatResponse = await generativeModel.generateContent(prompt);
-    let rawText = chatResponse.response.candidates[0].content.parts[0].text;
-    rawText = rawText
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
-    const evaluation = JSON.parse(rawText);
-
-    // Asynchronous background metric recording into AlloyDB
-    dbPool
-      .query(
-        `INSERT INTO feynman_logs (user_id, topic, grade, mastered, created_at) 
-       VALUES ($1, $2, $3, $4, NOW())`,
-        [user.uid, topic, evaluation.grade, evaluation.isMastered],
-      )
-      .catch((err) => {
-        console.error("AlloyDB Error - non block", err);
-      });
-
-    res.status(200).json(evaluation);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Evaluation engine failed." });
-  }
+// Health Check
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "UP", timestamp: new Date().toISOString() });
 });
 
-// Dynamic Config Injection Endpoint for Frontend Firebase setup
+// Firebase Config
 app.get("/api/firebase-config", (req, res) => {
-  console.log(
-    "Firebase Config requested. Project ID:",
-    process.env.FIREBASE_PROJECT_ID,
-  );
-
-  const config = {
+  res.json({
     apiKey: process.env.FIREBASE_API_KEY || "",
-    authDomain:
-      process.env.FIREBASE_AUTH_DOMAIN || "pw-pune-warnup.firebaseapp.com",
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN || "pw-pune-warnup.firebaseapp.com",
     projectId: process.env.FIREBASE_PROJECT_ID || "pw-pune-warnup",
-    storageBucket:
-      process.env.FIREBASE_STORAGE_BUCKET ||
-      "pw-pune-warnup.firebasestorage.app",
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "pw-pune-warnup.firebasestorage.app",
     messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
     appId: process.env.FIREBASE_APP_ID || "",
-  };
-
-  if (!config.apiKey) {
-    console.error(
-      "Critical Warning: FIREBASE_API_KEY is null or undefined in backend env vars.",
-    );
-  }
-
-  res.setHeader("Content-Type", "application/json");
-  return res.status(200).json(config);
+  });
 });
 
-// Fallback to index.html for SPA
+// Feynman Evaluation
+const evaluationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: "Assessment limit reached. Take a breath!" }
+});
+
+app.post("/api/evaluateFeynman", 
+  authenticate,
+  evaluationLimiter,
+  [
+    body("topic").isString().trim().isLength({ min: 2, max: 200 }),
+    body("explanation").isString().trim().isLength({ min: 10, max: 2000 })
+  ],
+  async (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: "Invalid input provided.", details: errors.array() });
+    }
+
+    try {
+      const { topic, explanation } = req.body;
+      const result = await aiService.evaluateFeynman(topic, explanation);
+
+      // Async log to database (Non-blocking)
+      dbPool.query(
+        "INSERT INTO feynman_logs (user_id, topic, grade, mastered, created_at) VALUES ($1, $2, $3, $4, NOW())",
+        [req.user.uid, topic, result.grade, result.isMastered]
+      ).catch(err => console.error("DB Log Error:", err.message));
+
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// 5. ERROR HANDLING & FALLBACK
+app.use((err, req, res, next) => {
+  console.error("Unhandled Error:", err);
+  res.status(500).json({ 
+    error: "Internal Server Error", 
+    message: process.env.NODE_ENV === "production" ? "An unexpected error occurred." : err.message 
+  });
+});
+
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+    console.log(`[PASS] Server ready on port ${PORT}`);
   });
 }
 

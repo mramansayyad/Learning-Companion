@@ -196,3 +196,48 @@ textarea {
   white-space: nowrap;
   border-width: 0;
 }
+
+
+/* Toast & Global Errors */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 12px 24px;
+  border-radius: 8px;
+  background: rgba(20, 20, 20, 0.9);
+  color: white;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  animation: slideInApp 0.3s ease-out;
+}
+
+.toast-error { border-color: #ff4444; color: #ff4444; }
+.toast-warning { border-color: #ffbb33; color: #ffbb33; }
+.toast-success { border-color: #00C851; color: #00C851; }
+
+.global-error {
+  background: #ff4444;
+  color: white;
+  text-align: center;
+  padding: 10px;
+  font-weight: bold;
+}
+
+@keyframes slideInApp {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.evaluation-feedback {
+  margin-top: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.error-text {
+  color: #ff4444;
+  font-weight: 500;
+}
